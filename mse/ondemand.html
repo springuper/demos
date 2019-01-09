@@ -1,0 +1,210 @@
+<html>
+<head>
+  <title>MSE Demo - Interact with Video Element</title>
+  <style>
+    .container {
+      width: 60%;
+      margin: 2rem auto;
+    }
+
+    #video {
+      width: 100%;
+    }
+
+    #log {
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <video id="video" controls="true"></video>
+    <div id="log">
+      <h5>Logs:</h5>
+    </div>
+  </div>
+  <script>
+    const MANIFEST = 'tubi_dash.mpd';
+    const videoElement = document.querySelector('video');
+    const logElement = document.querySelector('#log');
+    let mediaSource;
+    let sourceBuffer;
+    let manifest;
+    let loadedMap = {};
+
+    function log(message) {
+      const item = document.createElement('p');
+      item.textContent = message;
+      logElement.appendChild(item);
+    } 
+
+    // parse time string in MPD like 'PT0H0M34.333S' to milliseconds
+    function parseTime(timeString) {
+      const reg = /(\d+)H(\d+)M([0-9.]+)S$/;
+      const matches = timeString.match(reg);
+      const hours = parseInt(matches[1], 10);
+      const minutes = parseInt(matches[2], 10);
+      const seconds = parseFloat(matches[3]);
+      return (((hours * 60 + minutes) * 60) + seconds) * 1000;
+    }
+
+    // parse DASH manifest MDT file
+    function parseManifest(xml) {
+      const parser = new DOMParser();
+      const data = parser.parseFromString(xml, 'text/xml', 0);
+      try {
+        const representation = data.querySelector('Representation');
+        return {
+          mimeType: representation.getAttribute('mimeType'),
+          codecs: representation.getAttribute('codecs'),
+          bandwidth: representation.getAttribute('bandwidth'),
+          mediaPresentationDuration: parseTime(data.querySelector('MPD').getAttribute('mediaPresentationDuration')),
+          maxSegmentDuration: parseTime(data.querySelector('MPD').getAttribute('maxSegmentDuration')),
+          initializationUrl: representation.querySelector('Initialization').getAttribute('sourceURL'),
+          segmentUrlList: Array.from(representation.querySelectorAll('SegmentURL'))
+            .map(segmentURL => segmentURL.getAttribute('media')),
+        };
+      } catch (ex) {}
+
+      return null;
+    }
+
+    function isAllLoaded() {
+      const segmentLength = manifest.segmentUrlList.length;
+      const loadedLength = Object.keys(loadedMap).filter(index => loadedMap[index].loaded).length;
+      console.log('===isAllLoaded', segmentLength, loadedLength, loadedMap);
+      return segmentLength === loadedLength;
+    }
+
+    function getSegmentIndexByTime(time) {
+      return Math.floor(time / manifest.maxSegmentDuration);
+    }
+
+    function fetchManifest(url) {
+      log(`load manifest ${url}`);
+      return fetch(url)
+        .then(response => response.text())
+        .then(text => parseManifest(text));
+    }
+
+    function fetchSegment(url) {
+      return fetch(url)
+        .then(response => response.arrayBuffer());
+    }
+
+    function appendSegment(index) {
+      if (index > manifest.segmentUrlList.length - 1) return;
+      if (loadedMap[index] && (loadedMap[index].loading || loadedMap[index].loaded)) {
+        // log('abort to append segment because the current segment is loading or loaded');
+        return;
+      }
+      if (sourceBuffer.updating) {
+        log('abort to append segment because the previous one does not finish yet');
+        return;
+      }
+
+      const segmentUrl = manifest.segmentUrlList[index];
+      loadedMap[index] = { loaded: false, loading: true };
+      fetchSegment(segmentUrl)
+        .then((segment) => {
+          log(`segment ${segmentUrl} loaded`);
+          loadedMap[index] = { loaded: true, loading: false };
+          sourceBuffer.appendBuffer(segment);
+          if (isAllLoaded()) {
+            sourceBuffer.addEventListener('updateend', () => {
+              onEnded();
+            });
+          }
+        })
+        .catch((error) => {
+          log(`failed to load segment ${segmentUrl}, error: ${error}`);
+          loadedMap[index] = { loaded: false, loading: false };
+        });
+    }
+
+    function initVideo() {
+      log(`load initialization ${manifest.initializationUrl}`);
+      const onInitializationFinish = () => {
+        sourceBuffer.removeEventListener('updateend', onInitializationFinish);
+        // load the first segment to facilitate playback from beginning
+        appendSegment(0);
+      };
+      fetchSegment(manifest.initializationUrl)
+        .then((initialization) => {
+          sourceBuffer.addEventListener('updateend', onInitializationFinish);
+          sourceBuffer.appendBuffer(initialization);
+        });
+    }
+
+    function onTimeupdate() {
+      console.log();
+      const currentTime = videoElement.currentTime * 1000;
+      const currentIndex = getSegmentIndexByTime(currentTime);
+      const aheadIndex = getSegmentIndexByTime(currentTime + 2000);
+      // load next segment in advance by 2s
+      if (aheadIndex > currentIndex) {
+        appendSegment(aheadIndex);
+      }
+    }
+
+    function onSeeking() {
+      appendSegment(getSegmentIndexByTime(videoElement.currentTime * 1000));
+    }
+
+    function onEnded() {
+      if (mediaSource.readyState === 'open') {
+        mediaSource.endOfStream();
+      }
+    }
+
+    function onMediaSourceOpen() {
+      log('media source open');
+
+      videoElement.addEventListener('timeupdate', onTimeupdate);
+      videoElement.addEventListener('seeking', onSeeking);
+      videoElement.addEventListener('ended', onEnded);
+
+      fetchManifest(MANIFEST)
+        .then((result) => {
+          manifest = result;
+          log(
+            `manifest parsed, chunks: ${manifest.segmentUrlList.length}, ` +
+            `bandwidth: ${manifest.bandwidth}b, duration: ${manifest.mediaPresentationDuration}ms`
+          );
+
+          const type = `${manifest.mimeType}; codecs="${manifest.codecs}"`;
+          if (!window.MediaSource.isTypeSupported(type)) {
+            log(`unsupported type: ${type}`);
+            return Promise.reject('unsupported type');
+          }
+
+          sourceBuffer = mediaSource.addSourceBuffer(type);
+          initVideo();
+        });
+    }
+
+    function onMediaSourceClose() {
+      log('media source close');
+    }
+
+    function onMediaSourceEnded() {
+      log('media source ended');
+    }
+
+    function main() {
+      if (!window.MediaSource) {
+        log('The current browser doesn\'t support MSE');
+        return;
+      }
+
+      mediaSource = new window.MediaSource();
+      mediaSource.addEventListener('sourceopen', onMediaSourceOpen);
+      mediaSource.addEventListener('sourceclose', onMediaSourceClose);
+      mediaSource.addEventListener('sourceended', onMediaSourceEnded);
+      videoElement.src = window.URL.createObjectURL(mediaSource);
+    }
+
+    window.onload = main;
+  </script>    
+</body>
+</html>

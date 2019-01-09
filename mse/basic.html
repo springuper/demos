@@ -1,0 +1,140 @@
+<html>
+<head>
+  <title>MSE Demo</title>
+  <style>
+    .container {
+      width: 60%;
+      margin: 2rem auto;
+    }
+
+    #video {
+      width: 100%;
+    }
+
+    #log {
+      color: #333;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <video id="video" controls="true"></video>
+    <div id="log">
+      <h5>Logs:</h5>
+    </div>
+  </div>
+  <script>
+    const MANIFEST = 'tubi_dash.mpd';
+    const videoElement = document.querySelector('video');
+    const logElement = document.querySelector('#log');
+    let mediaSource;
+    let sourceBuffer;
+    let manifest;
+    let segmentIndex = -1;
+
+    function log(message) {
+      const item = document.createElement('p');
+      item.textContent = message;
+      logElement.appendChild(item);
+    } 
+
+    function parseManifest(xml) {
+      const parser = new DOMParser();
+      const data = parser.parseFromString(xml, 'text/xml', 0);
+      try {
+        const representation = data.querySelector('Representation');
+        return {
+          mimeType: representation.getAttribute('mimeType'),
+          codecs: representation.getAttribute('codecs'),
+          initializationUrl: representation.querySelector('Initialization').getAttribute('sourceURL'),
+          segmentUrlList: Array.from(representation.querySelectorAll('SegmentURL'))
+            .map(segmentURL => segmentURL.getAttribute('media')),
+        };
+      } catch (ex) {}
+
+      return null;
+    }
+
+    function fetchManifest(url) {
+      log(`load manifest ${url}`);
+      return fetch(url)
+        .then(response => response.text())
+        .then(text => parseManifest(text));
+    }
+
+    function fetchSegment(url) {
+      return fetch(url)
+        .then(response => response.arrayBuffer());
+    }
+
+    function nextSegment() {
+      segmentIndex++;
+      if (segmentIndex === manifest.segmentUrlList.length) {
+        log('all segment loaded');
+        sourceBuffer.removeEventListener('updateend', nextSegment);
+        mediaSource.endOfStream();
+        return;
+      }
+
+      const segmentUrl = manifest.segmentUrlList[segmentIndex];
+      log(`load segment ${segmentUrl}`);
+      fetchSegment(segmentUrl)
+        .then((segment) => {
+          sourceBuffer.appendBuffer(segment);
+        });
+    }
+
+    function initVideo() {
+      log(`load initialization ${manifest.initializationUrl}`);
+      fetchSegment(manifest.initializationUrl)
+        .then((initialization) => {
+          sourceBuffer.appendBuffer(initialization);
+        });
+    }
+
+    function onMediaSourceOpen() {
+      log('media source open');
+
+      fetchManifest(MANIFEST)
+        .then((result) => {
+          manifest = result;
+          log(`manifest parsed, there are ${manifest.segmentUrlList.length} chunks`);
+
+          const type = `${manifest.mimeType}; codecs="${manifest.codecs}"`;
+          if (!window.MediaSource.isTypeSupported(type)) {
+            log(`unsupported type: ${type}`);
+            return Promise.reject('unsupported type');
+          }
+
+          sourceBuffer = mediaSource.addSourceBuffer(type);
+          sourceBuffer.addEventListener('updateend', nextSegment);
+
+          initVideo();
+        });
+    }
+
+    function onMediaSourceClose() {
+      log('media source close');
+    }
+
+    function onMediaSourceEnded() {
+      log('media source ended');
+    }
+
+    function main() {
+      if (!window.MediaSource) {
+        log('The current browser doesn\'t support MSE');
+        return;
+      }
+
+      mediaSource = new window.MediaSource();
+      mediaSource.addEventListener('sourceopen', onMediaSourceOpen);
+      mediaSource.addEventListener('sourceclose', onMediaSourceClose);
+      mediaSource.addEventListener('sourceended', onMediaSourceEnded);
+      videoElement.src = window.URL.createObjectURL(mediaSource);
+    }
+
+    window.onload = main;
+  </script>    
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "private": true,
+  "name": "demos",
+  "version": "1.0.0",
+  "description": "Demos for frontend stuff",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/springuper/demos.git"
+  },
+  "author": "springuper <springuper@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/springuper/demos/issues"
+  },
+  "homepage": "https://github.com/springuper/demos#readme"
+}
